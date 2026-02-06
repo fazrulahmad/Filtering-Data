@@ -28,14 +28,22 @@ def normalize_value(value):
     value = str(value).upper()
     return re.sub(r"[^A-Z0-9]", "", value)
 
+def build_composite_key(df, col_a, col_b):
+    return (
+        df[col_a].apply(normalize_value) + "|" + df[col_b].apply(normalize_value)
+    )
 
 
 def reconcile_data(df1, df2, column, mode="exact", threshold=80):
     df1 = df1.copy()
     df2 = df2.copy()
 
-    df1["_key"] = df1[column].apply(normalize_value)
-    df2["_key"] = df2[column].apply(normalize_value)
+    if column == "Company+NPP":
+        df1["_key"] = build_composite_key(df1, "Company", "NPP")
+        df2["_key"] = build_composite_key(df2, "Company", "NPP")
+    else:
+        df1["_key"] = df1[column].apply(normalize_value)
+        df2["_key"] = df2[column].apply(normalize_value)
 
     if mode == "exact":
         merged = df1.merge(
@@ -78,6 +86,14 @@ def reconcile_data(df1, df2, column, mode="exact", threshold=80):
 
     return data_cocok, anomali_sheet1, anomali_sheet2
 
+def write_large_df(writer, df, sheet_base_name):
+    max_rows = 1_000_000
+    for i in range(0, len(df), max_rows):
+        chunk = df.iloc[i:i + max_rows]
+        sheet_name = f"{sheet_base_name}_{i//max_rows + 1}"
+        chunk.to_excel(writer, sheet_name=sheet_name, index=False)
+
+
 
 
 @app.post("/process-download")
@@ -103,8 +119,13 @@ async def process_and_download(
     df1 = excel.parse(sheet1)
     df2 = excel.parse(sheet2)
 
-    if column not in df1.columns or column not in df2.columns:
-        raise HTTPException(status_code=400, detail="Kolom tidak ditemukan")
+    if column == "Company+NPP":
+        required = {"Company", "NPP"}
+        if not required.issubset(df1.columns) or not required.issubset(df2.columns):
+            raise HTTPException(status_code=400, detail="Kolom Company/NPP tidak ditemukan")
+    else:
+        if column not in df1.columns or column not in df2.columns:
+            raise HTTPException(status_code=400, detail="Kolom tidak ditemukan")
 
     cocok, anomali_s1, anomali_s2 = reconcile_data(
         df1, df2, column, mode
@@ -113,13 +134,14 @@ async def process_and_download(
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        cocok.to_excel(writer, sheet_name="Data_Cocok", index=False)
+        write_large_df(writer, cocok, "Data_Cocok")
         anomali_s1.to_excel(writer, sheet_name="Anomali_Sheet1", index=False)
         anomali_s2.to_excel(writer, sheet_name="Anomali_Sheet2", index=False)
 
     output.seek(0)
 
-    filename = f"hasil_filtering_{column.lower()}_{mode}.xlsx"
+    safe_column = column.lower().replace("+", "_")
+    filename = f"hasil_filtering_{safe_column}_{mode}.xlsx"
 
     return StreamingResponse(
         output,
