@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Request
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 import pandas as pd
 import io
 import re
@@ -46,13 +46,26 @@ def reconcile_data(df1, df2, column, mode="exact", threshold=80):
         df2["_key"] = df2[column].apply(normalize_value)
 
     if mode == "exact":
-        merged = df1.merge(
-            df2,
-            on="_key",
-            how="outer",
-            indicator=True,
-            suffixes=("_sheet1", "_sheet2")
-        )
+        if column == "Company":
+            occ_col = "_occ_idx"
+            df1[occ_col] = df1.groupby("_key").cumcount()
+            df2[occ_col] = df2.groupby("_key").cumcount()
+
+            merged = df1.merge(
+                df2,
+                on=["_key", occ_col],
+                how="outer",
+                indicator=True,
+                suffixes=("_sheet1", "_sheet2")
+            ).drop(columns=[occ_col], errors="ignore")
+        else:
+            merged = df1.merge(
+                df2,
+                on="_key",
+                how="outer",
+                indicator=True,
+                suffixes=("_sheet1", "_sheet2")
+            )
 
     elif mode == "fuzzy":
         choices = df2["_key"].tolist()
@@ -93,6 +106,60 @@ def write_large_df(writer, df, sheet_base_name):
         sheet_name = f"{sheet_base_name}_{i//max_rows + 1}"
         chunk.to_excel(writer, sheet_name=sheet_name, index=False)
 
+def get_filter_columns(df1, df2):
+    common_columns = [col for col in df1.columns if col in df2.columns]
+    columns = [str(col) for col in common_columns]
+
+    required = {"Company", "NPP"}
+    if required.issubset(df1.columns) and required.issubset(df2.columns):
+        columns.append("Company+NPP")
+
+    return columns
+
+def build_summary(df1, df2, cocok, anomali_s1, anomali_s2):
+    total_sheet1 = len(df1)
+    total_sheet2 = len(df2)
+    total_cocok = len(cocok)
+    total_anomali_s1 = len(anomali_s1)
+    total_anomali_s2 = len(anomali_s2)
+    denominator = max(total_sheet1, total_sheet2)
+    matching_rate = (total_cocok / denominator * 100) if denominator else 0
+
+    return pd.DataFrame(
+        [
+            {"Metric": "Total data Sheet1", "Value": total_sheet1},
+            {"Metric": "Total data Sheet2", "Value": total_sheet2},
+            {"Metric": "Total data_cocok", "Value": total_cocok},
+            {"Metric": "Total anomali_sheet1", "Value": total_anomali_s1},
+            {"Metric": "Total anomali_sheet2", "Value": total_anomali_s2},
+            {"Metric": "Matching rate (%)", "Value": round(matching_rate, 2)},
+        ]
+    )
+
+
+@app.post("/detect-columns")
+async def detect_columns(
+    file: UploadFile,
+    sheet1: str = Form(...),
+    sheet2: str = Form(...)
+):
+    if not file.filename.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="File harus .xlsx")
+
+    try:
+        contents = await file.read()
+        excel = pd.ExcelFile(io.BytesIO(contents))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Gagal membaca file Excel")
+
+    if sheet1 not in excel.sheet_names or sheet2 not in excel.sheet_names:
+        raise HTTPException(status_code=400, detail="Nama sheet tidak ditemukan")
+
+    df1 = excel.parse(sheet1)
+    df2 = excel.parse(sheet2)
+    columns = get_filter_columns(df1, df2)
+
+    return JSONResponse(content={"columns": columns})
 
 
 
@@ -134,6 +201,8 @@ async def process_and_download(
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        summary = build_summary(df1, df2, cocok, anomali_s1, anomali_s2)
+        summary.to_excel(writer, sheet_name="Summary", index=False)
         write_large_df(writer, cocok, "Data_Cocok")
         anomali_s1.to_excel(writer, sheet_name="Anomali_Sheet1", index=False)
         anomali_s2.to_excel(writer, sheet_name="Anomali_Sheet2", index=False)

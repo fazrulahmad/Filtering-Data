@@ -98,10 +98,10 @@
         <label for="column">Kolom Filtering</label>
         <select id="column" name="column" required>
             <option value="">-- Pilih Kolom --</option>
-            <option value="Nama">Nama</option>
-            <option value="NPP">NPP</option>
-            <option value="Company+NPP">Company + NPP</option>
         </select>
+        <p id="column-status" style="font-size:12px; color:#666; margin-top:8px;">
+            Upload file dan isi nama sheet untuk auto-detect kolom.
+        </p>
 
         <label for="mode">Mode Pencocokan</label>
         <select id="mode" name="mode">
@@ -116,7 +116,75 @@
 </div>
 
 <footer>
-    © 2026 — Sistem Filtering Data Spreadsheet
+    (c) 2026 - Sistem Filtering Data Spreadsheet
 </footer>
+<script>
+    const fileInput = document.getElementById("file");
+    const sheet1Input = document.getElementById("sheet1");
+    const sheet2Input = document.getElementById("sheet2");
+    const columnSelect = document.getElementById("column");
+    const columnStatus = document.getElementById("column-status");
+
+    function setColumnOptions(columns) {
+        columnSelect.innerHTML = '<option value="">-- Pilih Kolom --</option>';
+        columns.forEach((col) => {
+            const opt = document.createElement("option");
+            opt.value = col;
+            opt.textContent = col === "Company+NPP" ? "Company + NPP" : col;
+            columnSelect.appendChild(opt);
+        });
+    }
+
+    async function detectColumns() {
+        const file = fileInput.files[0];
+        const sheet1 = sheet1Input.value.trim();
+        const sheet2 = sheet2Input.value.trim();
+
+        if (!file || !sheet1 || !sheet2) {
+            return;
+        }
+
+        columnStatus.textContent = "Mendeteksi kolom...";
+
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("sheet1", sheet1);
+        formData.append("sheet2", sheet2);
+
+        try {
+            const response = await fetch("/detect-columns", {
+                method: "POST",
+                body: formData
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.detail || "Gagal detect kolom.");
+            }
+
+            setColumnOptions(data.columns || []);
+
+            if (!data.columns || data.columns.length === 0) {
+                columnStatus.textContent = "Tidak ada kolom yang sama di kedua sheet.";
+                return;
+            }
+
+            columnStatus.textContent = `${data.columns.length} kolom berhasil terdeteksi.`;
+        } catch (err) {
+            setColumnOptions([]);
+            columnStatus.textContent = err.message;
+        }
+    }
+
+    let detectTimer;
+    function scheduleDetect() {
+        clearTimeout(detectTimer);
+        detectTimer = setTimeout(detectColumns, 400);
+    }
+
+    fileInput.addEventListener("change", detectColumns);
+    sheet1Input.addEventListener("input", scheduleDetect);
+    sheet2Input.addEventListener("input", scheduleDetect);
+</script>
 </body>
 </html>
